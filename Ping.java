@@ -3,7 +3,13 @@ import java.net.InetAddress;
 
 public class Ping {
     public static void main(String[] args) {
-        String host = "10.3.88.19";  // 핑을 보낼 대상
+        // 커맨드라인 파라미터가 없으면 사용법을 출력하고 종료
+        if (args.length != 1) {
+            System.out.println("Usage: java Ping <hostname>");
+            return;
+        }
+
+        String host = args[0];  // 커맨드라인 인수에서 호스트명을 가져옴
         int timeout = 1000;  // 타임아웃 시간 (밀리초 단위)
         int count = 10;  // 핑을 보낼 횟수
 
