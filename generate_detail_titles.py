@@ -7,6 +7,7 @@ from typing import List, Tuple
 CSV_PATH = Path('요구사항정의서_V2.csv')
 OUTPUT_PATH = Path('요구사항정의서_상세요구사항명_2.csv')
 PREFERRED_ENCODINGS = ('utf-8-sig', 'utf-8', 'cp949')
+PRIORITY_DESC_KEY = '__detail_desc_for_title'
 
 SUFFIXES = sorted({
     '으로부터','으로써','으로서','으로는','으로','로부터','로써','로서','로는','로','에게서','에게','께서','부터','까지','에서는','에서','에서의',
@@ -226,6 +227,39 @@ COMBINE_PAIRS = {
 }
 
 
+def prioritize_detail_desc(detail_desc: str) -> str:
+    if not detail_desc:
+        return detail_desc
+
+    bullet_lines: List[str] = []
+    other_lines: List[str] = []
+
+    for raw_line in detail_desc.replace('\r', '\n').split('\n'):
+        if not raw_line.strip():
+            continue
+        stripped_leading = raw_line.lstrip()
+        if stripped_leading.startswith('○'):
+            content = stripped_leading[1:].lstrip(' \t-:;·•∙‧▸▶,')
+            content = content.strip()
+            if content:
+                bullet_lines.append(content)
+        else:
+            other_lines.append(stripped_leading.strip())
+
+    if bullet_lines:
+        combined = bullet_lines + [line for line in other_lines if line]
+        return ' '.join(combined)
+
+    return detail_desc
+
+
+def get_effective_detail_desc(row: dict) -> str:
+    prioritized = row.get(PRIORITY_DESC_KEY, '')
+    if prioritized:
+        return prioritized
+    return row.get('detail_desc', '')
+
+
 def normalize(text: str) -> str:
     text = text.replace('\r', ' ').replace('\n', ' ')
     text = re.sub(r'[<>\[\]\(\)_]', ' ', text)
@@ -281,7 +315,7 @@ def ensure_descriptive_tokens(tokens: List[str], row: dict) -> List[str]:
     sources = [
         (tokens, 3),
         (tokenize_text(row.get('rfp_title', '')), 2),
-        (tokenize_text(row.get('detail_desc', '')), 1),
+        (tokenize_text(get_effective_detail_desc(row)), 1),
     ]
 
     positions: dict[str, Tuple[int, int]] = {}
@@ -418,7 +452,7 @@ def normalize_focus_token(token: str) -> str:
 
 def gather_focus_candidates(row: dict) -> List[str]:
     base_title = row.get('detail_title', '')
-    normalized_desc = normalize(row.get('detail_desc', ''))
+    normalized_desc = normalize(get_effective_detail_desc(row))
     raw_tokens = re.findall(r'[가-힣A-Za-z0-9]+', normalized_desc)
     candidates: List[str] = []
     backups: List[str] = []
@@ -445,7 +479,7 @@ def gather_focus_candidates(row: dict) -> List[str]:
         destination.append(normalized)
         seen.add(normalized)
 
-    for tok in tokenize_text(row.get('detail_desc', '')):
+    for tok in tokenize_text(get_effective_detail_desc(row)):
         append_candidate(tok)
 
     for tok in tokenize_text(row.get('rfp_title', '')):
@@ -464,7 +498,8 @@ def gather_focus_candidates(row: dict) -> List[str]:
 
 
 def build_title(row: dict, focus_tokens: List[str] | None = None) -> str:
-    result = extract_action(row.get('detail_desc', ''))
+    detail_text = get_effective_detail_desc(row)
+    result = extract_action(detail_text)
     if result is None:
         raw_tokens = [strip_particle(tok) for tok in re.findall(r'[가-힣A-Za-z0-9]+', normalize(row.get('rfp_title', '')))]
         base_tokens = [tok for tok in raw_tokens if tok and tok not in STOPWORDS]
@@ -598,6 +633,7 @@ def main():
         fieldnames.append('detail_title')
 
     for row in rows:
+        row[PRIORITY_DESC_KEY] = prioritize_detail_desc(row.get('detail_desc', ''))
         row['detail_title'] = build_title(row)
 
     enforce_unique_titles(rows)
