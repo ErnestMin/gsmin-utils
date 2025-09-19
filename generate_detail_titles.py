@@ -1,9 +1,11 @@
 import csv
 import re
 from pathlib import Path
-from typing import List
+from typing import List, Tuple
 
 CSV_PATH = Path('요구사항정의서.csv')
+OUTPUT_PATH = Path('요구사항정의서_상세요구사항명.csv')
+PREFERRED_ENCODINGS = ('utf-8-sig', 'utf-8', 'cp949')
 
 SUFFIXES = sorted({
     '으로부터','으로써','으로서','으로는','으로','로부터','로써','로서','로는','로','에게서','에게','께서','부터','까지','에서는','에서','에서의',
@@ -13,10 +15,10 @@ SUFFIXES = sorted({
     '하면서도','면서','면서도','면서는','이고','이면','인가','인가요','인가에','이라든','이라네','이라니','이라','라','마저','조차','밖에','뿐','도록',
     '하려면','하려고','하기','하기위해','하기위한','하기위해','간의','간'
 }, key=len, reverse=True)
-SUFFIX_CHARS = set('은는이가을를과와의도만로에')
+SUFFIX_CHARS = set('은는이가을를과와의도만로에하')
 
 ACTION_KEYWORDS = sorted({
-    '수립','구축','제공','지원','관리','운영','연계','연동','통합','모니터링','점검','검증','분석','작성','제출','생성','설정','확인','검토',
+    '수립','구축','구성','제공','지원','관리','운영','연계','연동','통합','모니터링','점검','검증','분석','작성','제출','생성','설정','확인','검토',
     '발굴','추출','정의','개선','개발','유지','정비','전환','도입','적용','준수','확보','추진','강화','통제','교육','훈련','진단','검사','평가',
     '마련','활용','반영','제시','보고','통보','알림','자동화','승인','발송','배포','수집','갱신','업데이트','편성','등록','조회','검색','열람',
     '발급','이행','확장','연결','분류','감시','감독','조정','개편','보완','고도화','최적화','표준화','표준','준용','준비','진행','운용','활성화',
@@ -43,6 +45,7 @@ ACTION_LABELS = {
     '설정': '설정',
     '확인': '확인 절차 수립',
     '검토': '검토 절차 수립',
+    '구성': '구성',
     '발굴': '발굴 체계 구축',
     '추출': '추출 기능 제공',
     '정의': '정의',
@@ -150,6 +153,7 @@ ACTION_BONUS = {
     '전송': 3,
     '이관': 3,
     '재설계': 3,
+    '구성': 3,
 }
 
 STOPWORDS = set("""
@@ -158,6 +162,13 @@ STOPWORDS = set("""
 
 POST_TOKENS = {
     '체계','방안','계획','절차','기준','전략','대책','시스템','서비스','프로세스','기능','플랫폼','로드맵','지침','가이드','매뉴얼','도구','모듈','환경','체제','조직','프로그램','대응','조치','지표','평가','표준','표준화','센터','포털','데이터','정보','지원','연계','연동','통합','알림','보고','관리','항목','목록','리스트','등록','DB','포맷','양식','자료','수단','방법','모델','모형','분석','진단','감리','대장','통계','메뉴','콘텐츠','정책'
+}
+
+GENERIC_TARGETS = {
+    '관리','운영','지원','협조','준수','수립','구축','확보','이행','체계','방안','계획','절차','기준','정책','업무','규정','요구사항',
+    '사항','내용','현황','데이터','시스템','서비스','플랫폼','프로세스','기능','환경','조직','수단','방법','모델','모형','도구','자료',
+    '센터','포털','메뉴','콘텐츠','리스트','목록','체제','전략','대책','지침','가이드','매뉴얼','지표','평가','대응','조치','연계',
+    '연동','통합','알림','보고','등록','검색','조회','열람','출력','표준','표준화','감리','대장','진단','분석','가이드라인','대상'
 }
 
 COMBINE_PAIRS = {
@@ -204,6 +215,8 @@ COMBINE_PAIRS = {
     ('접근','이력'): '접근이력',
     ('개발','표준'): '개발표준',
     ('기술','지원'): '기술지원',
+    ('전산','장비'): '전산장비',
+    ('자산','관리'): '자산관리',
 }
 
 
@@ -220,6 +233,8 @@ def strip_particle(token: str) -> str:
         if tok.endswith(suffix) and len(tok) > len(suffix) + 1:
             tok = tok[:-len(suffix)]
             break
+    if tok.endswith('적인') and len(tok) > 3:
+        tok = tok[:-1]
     if tok and tok[-1] in SUFFIX_CHARS and len(tok) > 1:
         tok = tok[:-1]
     return tok
@@ -238,6 +253,86 @@ def combine_tokens(tokens: List[str]) -> List[str]:
         combined.append(tokens[idx])
         idx += 1
     return combined
+
+
+def tokenize_text(text: str) -> List[str]:
+    normalized = normalize(text)
+    raw_tokens = re.findall(r'[가-힣0-9]+', normalized)
+    stripped = [strip_particle(tok) for tok in raw_tokens]
+    combined = combine_tokens(stripped)
+    ordered: List[str] = []
+    seen: set[str] = set()
+    for tok in combined:
+        if not tok or tok in STOPWORDS or len(tok) < 2:
+            continue
+        if tok not in seen:
+            ordered.append(tok)
+            seen.add(tok)
+    return ordered
+
+
+def ensure_descriptive_tokens(tokens: List[str], row: dict) -> List[str]:
+    sources = [
+        (tokens, 3),
+        (tokenize_text(row.get('rfp_title', '')), 2),
+        (tokenize_text(row.get('detail_desc', '')), 1),
+    ]
+
+    positions: dict[str, Tuple[int, int]] = {}
+    candidates: List[tuple[float, int, int, str]] = []
+    KEYWORD_BONUS = (
+        '데이터','시스템','감사','문서','보고','관리','계획','체계','절차','기준','표준','보안','품질','프로세스','자동','연계',
+        '용어','해석','문구','범위','협의','요청서','열람','검색','평가','지표','기능','모듈'
+    )
+    NEGATIVE_PATTERNS = (
+        '관련','의하','의해','의하여','사항','내용','달리','간','등'
+    )
+
+    for source_tokens, priority in sources:
+        for idx, tok in enumerate(source_tokens):
+            if not tok or tok in STOPWORDS or len(tok) < 2:
+                continue
+            if tok not in positions:
+                positions[tok] = (priority, idx)
+            score = priority * 20
+            score += min(len(tok), 12)
+            if tok not in GENERIC_TARGETS:
+                score += 18
+            else:
+                score -= 8
+            if any(keyword in tok for keyword in KEYWORD_BONUS):
+                score += 6
+            if any(pattern in tok for pattern in NEGATIVE_PATTERNS):
+                score -= 10
+            score -= idx * 0.5
+            candidates.append((score, priority, idx, tok))
+
+    candidates.sort(key=lambda item: (-item[0], -item[1], item[2]))
+
+    selected: List[str] = []
+    seen: set[str] = set()
+    for _, _, _, tok in candidates:
+        if tok in seen:
+            continue
+        selected.append(tok)
+        seen.add(tok)
+        if len(selected) >= 4:
+            break
+
+    if not selected:
+        fallback = strip_particle(row.get('rfp_title', '').strip())
+        selected = [fallback or '요구사항']
+
+    pruned: List[str] = []
+    for tok in selected:
+        if any(tok != other and tok in other and len(tok) <= len(other) - 1 for other in selected):
+            continue
+        pruned.append(tok)
+    if pruned:
+        selected = pruned
+
+    selected.sort(key=lambda tok: (-positions.get(tok, (0, 0))[0], positions.get(tok, (0, 0))[1]))
+    return selected[:4]
 
 
 def extract_action(detail_desc: str):
@@ -336,10 +431,8 @@ def build_title(row: dict) -> str:
             expanded.append('기능')
         else:
             expanded.append(tok)
-    filtered = expanded
-    if not filtered:
-        fallback = strip_particle(row.get('rfp_title', '').strip())
-        filtered = [fallback or '요구사항']
+    filtered = ensure_descriptive_tokens(expanded, row)
+    filtered = combine_tokens(filtered)
     target_phrase = ' '.join(filtered[:4])
     title = f"{target_phrase} {action_label}".strip()
     biz = row.get('biz_domain', '').strip()
@@ -348,14 +441,27 @@ def build_title(row: dict) -> str:
     return title
 
 
+def load_rows(path: Path) -> Tuple[List[dict], List[str], str]:
+    last_error: Exception | None = None
+    for encoding in PREFERRED_ENCODINGS:
+        try:
+            with path.open('r', encoding=encoding, newline='') as fp:
+                reader = csv.DictReader(fp)
+                rows = list(reader)
+                fieldnames = reader.fieldnames or []
+            return rows, fieldnames, encoding
+        except UnicodeDecodeError as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise UnicodeDecodeError('unknown', b'', 0, 1, 'No suitable encoding found')
+
+
 def main():
     if not CSV_PATH.exists():
         raise FileNotFoundError(f"CSV file not found: {CSV_PATH}")
 
-    with CSV_PATH.open('r', encoding='cp949', errors='ignore', newline='') as fp:
-        reader = csv.DictReader(fp)
-        rows = list(reader)
-        fieldnames = reader.fieldnames or []
+    rows, fieldnames, encoding = load_rows(CSV_PATH)
 
     if 'detail_title' not in fieldnames:
         fieldnames.append('detail_title')
@@ -363,7 +469,7 @@ def main():
     for row in rows:
         row['detail_title'] = build_title(row)
 
-    with CSV_PATH.open('w', encoding='cp949', newline='') as fp:
+    with OUTPUT_PATH.open('w', encoding=encoding, newline='') as fp:
         writer = csv.DictWriter(fp, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
